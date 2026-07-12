@@ -497,6 +497,19 @@
         <code>web_search(query, max_results=3, engines="all", output_format="text")</code> — 검색 실행<br>
         <code>search_stats()</code> — 오늘 엔진·키별 호출 현황 및 남은 한도 조회
       </div>
+
+      <h3>소스 위치 &amp; 실행 방법</h3>
+      <p>핵심 서버 로직은 프로젝트 루트의 <code>server.py</code> 한 파일입니다. 전체 소스: <a href="https://github.com/ChoiDongHee/ktds_lens">github.com/ChoiDongHee/ktds_lens</a></p>
+      <pre><code>git clone https://github.com/ChoiDongHee/ktds_lens.git
+cd ktds_lens
+.venv/Scripts/python.exe -m pip install -r requirements.txt
+cp .env.example .env   # 값 채우기
+
+# 1) 직접 실행 (stdio 기본값, 클라이언트 연결 대기 -- 자체 출력 없음)
+.venv/Scripts/python.exe server.py
+
+# 2) 또는 MCP 클라이언트에 등록해서 클라이언트가 자동으로 띄우게 함 (아래 "MCP 클라이언트 등록" 참고)
+# 3) 네트워크로 공유하려면 .env의 MCP_TRANSPORT=sse 로 바꾸고 위와 동일하게 실행</code></pre>
     </section>
 
     <section id="architecture">
@@ -821,5 +834,5 @@ print(time.perf_counter() - t0)
 </div>
 
 <footer class="page-footer">
-  Lens — 통합 검색 MCP 서버 내부 문서. 전체 소스는 <code>server.py</code>, <code>bm25_search/</code>, 설정은 <code>.env.example</code>을 참고하세요.
+  Lens — 통합 검색 MCP 서버 내부 문서. 핵심 서버 로직은 프로젝트 루트의 <code>server.py</code>, BM25 파이프라인은 <code>bm25_search/</code>, 설정은 <code>.env.example</code>을 참고하세요. 전체 소스: <a href="https://github.com/ChoiDongHee/ktds_lens">github.com/ChoiDongHee/ktds_lens</a>
 </footer>
