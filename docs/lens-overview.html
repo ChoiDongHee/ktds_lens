@@ -1,0 +1,825 @@
+<title>Lens — 통합 검색 MCP 서버</title>
+<meta name="description" content="Lens: 다중 검색엔진을 하나로 모으는 MCP 서버. 동작 원리, 설정, 동시성(쓰레드) 구조, BM25 파이프라인과 성능 평가를 정리한 문서.">
+<style>
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  }
+
+  :root {
+    --bg: #F3F4F6;
+    --bg-elevated: #FFFFFF;
+    --bg-sunken: #E8EAED;
+    --ink: #14171B;
+    --ink-soft: #545C68;
+    --ink-faint: #848D99;
+    --border: #DBDFE3;
+    --accent: #106B69;
+    --accent-ink: #ffffff;
+    --accent-soft-bg: #E1F1EF;
+    --accent-soft-border: #BFDEDC;
+    --good: #3E6B22;
+    --good-bg: #E7F1DF;
+    --warn: #8A5A0C;
+    --warn-bg: #FBF0DA;
+    --critical: #96332C;
+    --critical-bg: #FBE7E5;
+    --code-bg: #EAEDF0;
+    --code-ink: #2A2F36;
+    --shadow: 0 1px 2px rgba(20, 23, 27, 0.06), 0 8px 24px rgba(20, 23, 27, 0.05);
+    --sans: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", -apple-system, "Segoe UI", sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171B;
+      --bg-elevated: #1A1E23;
+      --bg-sunken: #101316;
+      --ink: #ECEEF1;
+      --ink-soft: #A2AAB5;
+      --ink-faint: #6C7480;
+      --border: #2B3038;
+      --accent: #3FC4BF;
+      --accent-ink: #05201F;
+      --accent-soft-bg: #163332;
+      --accent-soft-border: #21504D;
+      --good: #8FCB69;
+      --good-bg: #1B2A16;
+      --warn: #E7B458;
+      --warn-bg: #2E230F;
+      --critical: #E88079;
+      --critical-bg: #331714;
+      --code-bg: #20252B;
+      --code-ink: #DCE1E6;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+  }
+
+  :root[data-theme="light"] {
+    --bg: #F3F4F6; --bg-elevated: #FFFFFF; --bg-sunken: #E8EAED;
+    --ink: #14171B; --ink-soft: #545C68; --ink-faint: #848D99;
+    --border: #DBDFE3; --accent: #106B69; --accent-ink: #ffffff;
+    --accent-soft-bg: #E1F1EF; --accent-soft-border: #BFDEDC;
+    --good: #3E6B22; --good-bg: #E7F1DF; --warn: #8A5A0C; --warn-bg: #FBF0DA;
+    --critical: #96332C; --critical-bg: #FBE7E5;
+    --code-bg: #EAEDF0; --code-ink: #2A2F36;
+    --shadow: 0 1px 2px rgba(20, 23, 27, 0.06), 0 8px 24px rgba(20, 23, 27, 0.05);
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #14171B; --bg-elevated: #1A1E23; --bg-sunken: #101316;
+    --ink: #ECEEF1; --ink-soft: #A2AAB5; --ink-faint: #6C7480;
+    --border: #2B3038; --accent: #3FC4BF; --accent-ink: #05201F;
+    --accent-soft-bg: #163332; --accent-soft-border: #21504D;
+    --good: #8FCB69; --good-bg: #1B2A16; --warn: #E7B458; --warn-bg: #2E230F;
+    --critical: #E88079; --critical-bg: #331714;
+    --code-bg: #20252B; --code-ink: #DCE1E6;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16.5px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body { overflow-x: hidden; }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  h1, h2, h3, h4 { text-wrap: balance; letter-spacing: -0.01em; }
+
+  code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  code {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 0.12em 0.4em;
+    border-radius: 4px;
+    font-size: 0.86em;
+  }
+
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    padding: 16px 18px;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-size: 0.86em;
+    line-height: 1.6;
+    border: 1px solid var(--border);
+  }
+  pre code { background: none; padding: 0; border-radius: 0; }
+
+  /* ---------------- header ---------------- */
+
+  .hero {
+    position: relative;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+    background:
+      radial-gradient(circle at 82% 18%, var(--accent-soft-bg) 0%, transparent 55%),
+      var(--bg-elevated);
+  }
+
+  .hero-inner {
+    position: relative;
+    z-index: 1;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 76px 24px 56px;
+  }
+
+  .aperture {
+    position: absolute;
+    top: 50%;
+    right: -60px;
+    width: 340px;
+    height: 340px;
+    transform: translateY(-50%);
+    opacity: 0.5;
+    pointer-events: none;
+  }
+  .aperture svg { width: 100%; height: 100%; }
+  .aperture-blade {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1;
+    opacity: 0.35;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft-bg);
+    border: 1px solid var(--accent-soft-border);
+    padding: 5px 12px 5px 10px;
+    border-radius: 999px;
+  }
+  .eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  .hero h1 {
+    font-size: clamp(38px, 5.4vw, 58px);
+    font-weight: 800;
+    margin: 20px 0 10px;
+    line-height: 1.04;
+  }
+
+  .hero .lede {
+    font-size: 18px;
+    color: var(--ink-soft);
+    max-width: 620px;
+    margin: 0 0 28px;
+  }
+
+  .hero-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 28px;
+    margin-top: 32px;
+  }
+  .hero-stat dt {
+    font-size: 12px;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+  }
+  .hero-stat dd {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    font-family: var(--mono);
+  }
+  .hero-stat dd span { font-size: 13px; font-weight: 500; color: var(--ink-soft); font-family: var(--sans); }
+
+  /* ---------------- layout ---------------- */
+
+  .layout {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 24px;
+    display: grid;
+    grid-template-columns: 216px minmax(0, 1fr);
+    gap: 56px;
+    align-items: start;
+  }
+
+  nav.toc {
+    position: sticky;
+    top: 28px;
+    padding: 20px 0 40px;
+    font-size: 14px;
+  }
+  nav.toc .toc-title {
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 12px;
+  }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  nav.toc li a {
+    display: block;
+    color: var(--ink-soft);
+    text-decoration: none;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border-left: 2px solid transparent;
+  }
+  nav.toc li a:hover { color: var(--ink); background: var(--bg-sunken); }
+  nav.toc li.sub a { padding-left: 22px; font-size: 13px; }
+
+  main { min-width: 0; padding: 40px 0 100px; }
+
+  section { padding-top: 52px; scroll-margin-top: 24px; }
+  section:first-child { padding-top: 0; }
+
+  section h2 {
+    font-size: 27px;
+    font-weight: 800;
+    margin: 0 0 6px;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  section h2 .kicker {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-faint);
+  }
+  section > .section-lede {
+    color: var(--ink-soft);
+    max-width: 66ch;
+    margin: 0 0 28px;
+  }
+
+  h3 { font-size: 19px; font-weight: 700; margin: 32px 0 10px; }
+  h4 { font-size: 15.5px; font-weight: 700; margin: 22px 0 8px; color: var(--ink); }
+
+  p { max-width: 68ch; }
+  p.wide { max-width: none; }
+
+  ul.plain, ol.plain { padding-left: 22px; }
+  ul.plain li, ol.plain li { margin-bottom: 8px; max-width: 64ch; }
+
+  .card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    box-shadow: var(--shadow);
+  }
+
+  .grid-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+    margin: 20px 0 8px;
+  }
+  .feature {
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .feature .f-title { font-weight: 700; font-size: 14.5px; margin-bottom: 6px; }
+  .feature .f-body { font-size: 13.5px; color: var(--ink-soft); line-height: 1.55; }
+
+  /* tables */
+  .table-scroll { overflow-x: auto; margin: 18px 0 28px; border: 1px solid var(--border); border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; min-width: 560px; }
+  thead th {
+    text-align: left;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-faint);
+    background: var(--bg-sunken);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody td code { white-space: nowrap; }
+  td.num, th.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tr.highlight td { background: var(--accent-soft-bg); }
+  tr.highlight td:first-child { border-left: 2px solid var(--accent); }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; }
+  .pill.good { color: var(--good); background: var(--good-bg); }
+  .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .pill.critical { color: var(--critical); background: var(--critical-bg); }
+
+  /* thread guide specific */
+  .step-list { display: flex; flex-direction: column; gap: 0; margin: 24px 0; }
+  .step {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    gap: 16px;
+    padding: 18px 0;
+    border-top: 1px solid var(--border);
+  }
+  .step:first-child { border-top: none; }
+  .step-num {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: var(--accent-soft-bg);
+    color: var(--accent);
+    border: 1px solid var(--accent-soft-border);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 700; font-size: 13px;
+  }
+  .step h4 { margin: 2px 0 6px; }
+  .step p { margin: 0 0 8px; }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft-bg);
+    padding: 14px 18px;
+    border-radius: 0 10px 10px 0;
+    font-size: 14.5px;
+    margin: 18px 0;
+  }
+  .callout.warn { border-color: var(--warn); background: var(--warn-bg); }
+  .callout strong { display: block; margin-bottom: 3px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+  /* diagram */
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 24px 0;
+    font-family: var(--mono);
+    font-size: 13.5px;
+  }
+  .flow .node {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    box-shadow: var(--shadow);
+  }
+  .flow .arrow { color: var(--ink-faint); }
+
+  .divider { border: none; border-top: 1px solid var(--border); margin: 40px 0; }
+
+  footer.page-footer {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 28px 24px 64px 264px;
+    color: var(--ink-faint);
+    font-size: 13px;
+  }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; padding: 8px 0 0; }
+    nav.toc ol { flex-direction: row; flex-wrap: wrap; gap: 4px; }
+    nav.toc li a { border-left: none; padding: 6px 10px; font-size: 13px; }
+    nav.toc li.sub { display: none; }
+    .aperture { display: none; }
+    footer.page-footer { padding-left: 24px; }
+  }
+</style>
+
+<div class="hero">
+  <div class="aperture" aria-hidden="true">
+    <svg viewBox="0 0 200 200">
+      <g>
+        <polygon class="aperture-blade" points="100,20 160,60 160,140 100,180 40,140 40,60" />
+        <polygon class="aperture-blade" points="100,45 140,70 140,130 100,155 60,130 60,70" transform="rotate(20 100 100)" />
+        <polygon class="aperture-blade" points="100,45 140,70 140,130 100,155 60,130 60,70" transform="rotate(40 100 100)" />
+        <circle class="aperture-blade" cx="100" cy="100" r="92" />
+      </g>
+    </svg>
+  </div>
+  <div class="hero-inner">
+    <span class="eyebrow"><span class="dot"></span>MCP 서버 &middot; 내부 기술 문서</span>
+    <h1>Lens</h1>
+    <p class="lede">여러 검색엔진에서 들어오는 결과를 하나의 초점으로 모으는 통합 웹 검색 MCP 서버. 엔진들은 전부 동시에(스레드) 실행되고, 하나가 흐릿하면(실패/한도초과) 자동으로 다른 엔진에 초점을 맞춥니다.</p>
+    <dl class="hero-stats">
+      <div class="hero-stat"><dt>기본 구성 응답속도</dt><dd>1.48<span>초 (네이버 3종+본문보강)</span></dd></div>
+      <div class="hero-stat"><dt>속도 우선 구성</dt><dd>0.25<span>초 (네이버 뉴스만)</span></dd></div>
+      <div class="hero-stat"><dt>등록 엔진</dt><dd>4<span>개 (동시 실행)</span></dd></div>
+      <div class="hero-stat"><dt>BM25 랭킹 단계</dt><dd>&lt;50<span>ms (후보 100건 기준)</span></dd></div>
+    </dl>
+  </div>
+</div>
+
+<div class="layout">
+  <nav class="toc" aria-label="목차">
+    <div class="toc-title">목차</div>
+    <ol>
+      <li><a href="#overview">개요</a></li>
+      <li><a href="#architecture">아키텍처</a></li>
+      <li class="sub"><a href="#engines">검색 엔진</a></li>
+      <li class="sub"><a href="#fallback">폴백 로직</a></li>
+      <li class="sub"><a href="#enrichment">본문 보강</a></li>
+      <li><a href="#threads">쓰레드 구조 가이드</a></li>
+      <li class="sub"><a href="#thread-why">왜 쓰레드인가</a></li>
+      <li class="sub"><a href="#thread-batch">동시 실행 &amp; 타임아웃</a></li>
+      <li class="sub"><a href="#thread-bridge">FastMCP 브릿지</a></li>
+      <li><a href="#config">설정 가이드</a></li>
+      <li><a href="#mcp-setup">MCP 클라이언트 등록</a></li>
+      <li><a href="#bm25">BM25 유사도 검색</a></li>
+      <li class="sub"><a href="#bm25-pipeline">파이프라인 구조</a></li>
+      <li class="sub"><a href="#bm25-results">평가 결과</a></li>
+      <li><a href="#speed">검색 속도 리포트</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <section id="overview">
+      <h2>개요</h2>
+      <p class="section-lede">Lens는 DuckDuckGo와 네이버(뉴스/일반 웹문서/백과사전)를 하나의 MCP 툴로 묶은 검색 서버입니다. 여러 렌즈(엔진)를 동시에 열어 놓고, 가장 먼저 초점이 맞는 결과를 취하되 필요하면 다른 렌즈로 자동 전환합니다.</p>
+
+      <div class="grid-cards">
+        <div class="feature">
+          <div class="f-title">동시 실행</div>
+          <div class="f-body">요청된 모든 엔진을 스레드풀로 한 번에 실행. 순차 실행 대비 최대 4배 이상 빠름.</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">자동 폴백</div>
+          <div class="f-body">엔진 실패·한도초과·불용어 전체 매칭 시, 결과가 없을 때만 다른 엔진으로 자동 전환.</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">BM25 관련성 필터 (내장)</div>
+          <div class="f-body">엔진 합산 결과를 검색어와 BM25로 비교해, 우연히 한 단어만 겹치는 무관한 결과를 본문을 가져오기도 전에 제외. MCP 툴 자체에 내장되어 어떤 클라이언트로 붙어도 동일하게 적용됨.</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">본문 보강</div>
+          <div class="f-body">관련성 필터를 통과한 상위 결과는 스니펫이 아니라 trafilatura로 추출한 실제 기사 본문을 반환.</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">불용어 필터</div>
+          <div class="f-body">지정 키워드(기본: 스포츠 용어)가 섞인 결과를 자동 제외, 전부 걸리면 다른 엔진으로 폴백.</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">키 순환</div>
+          <div class="f-body">네이버 키를 여러 개 등록하면 하루 한도 근접 시 자동으로 다음 키로 순환.</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">BM25 서브시스템</div>
+          <div class="f-body"><code>bm25_search/</code>는 뉴스 후보군을 키워드 유사도 + 최신성으로 재정렬하는 독립 랭킹 파이프라인이자, 위 관련성 필터의 BM25 코어 자체이기도 함.</div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <strong>제공 툴</strong>
+        <code>web_search(query, max_results=3, engines="all", output_format="text")</code> — 검색 실행<br>
+        <code>search_stats()</code> — 오늘 엔진·키별 호출 현황 및 남은 한도 조회
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>아키텍처</h2>
+      <p class="section-lede">한 번의 <code>web_search</code> 호출이 내부적으로 어떤 경로를 지나는지 순서대로 정리합니다.</p>
+
+      <div class="flow" role="img" aria-label="요청이 엔진 실행, 폴백 판단, BM25 관련성 필터, 본문 보강을 거쳐 최종 응답으로 이어지는 흐름">
+        <div class="node">web_search()</div><div class="arrow">→</div>
+        <div class="node">SearchRouter._run_batch (동시 실행)</div><div class="arrow">→</div>
+        <div class="node">결과 있음?</div><div class="arrow">→</div>
+        <div class="node">BM25 관련성 필터</div><div class="arrow">→</div>
+        <div class="node">FETCH_CONTENT 보강</div><div class="arrow">→</div>
+        <div class="node">text / json 반환</div>
+      </div>
+
+      <h3 id="engines">검색 엔진</h3>
+      <p>모든 엔진은 <code>{"title", "url", "snippet"}</code> 공통 스키마로 정규화되어 <code>SearchRouter</code>가 출처와 무관하게 동일한 방식으로 합치고 표시합니다.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>엔진 이름</th><th>출처</th><th>키 필요</th><th>비고</th></tr></thead>
+          <tbody>
+            <tr><td><code>duckduckgo</code></td><td>ddgs 라이브러리</td><td>불필요</td><td>내부적으로 여러 백엔드를 순회해 느리고 편차가 커서 기본 목록에서는 제외됨</td></tr>
+            <tr><td><code>naver</code></td><td>네이버 오픈API <code>news.json</code></td><td>필요</td><td>뉴스/시사성 질의에 강함, <code>originallink</code>(원본 기사 URL) 사용</td></tr>
+            <tr><td><code>naver_web</code></td><td>네이버 오픈API <code>webkr.json</code></td><td>필요</td><td>일반 웹문서 — 실시간 시세 페이지, 공식 IR 페이지 등 뉴스가 놓치는 것 보완</td></tr>
+            <tr><td><code>naver_encyc</code></td><td>네이버 오픈API <code>encyc.json</code></td><td>필요</td><td>백과사전/용어사전 — "OO가 뭐야?" 류 정의성 질문에 강함</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>세 네이버 엔진은 같은 앱(Client ID/Secret)을 쓰기 때문에 <strong>일일 호출 한도를 공유</strong>합니다. 키를 여러 개 등록(<code>NAVER_CLIENT_IDS</code>에 콤마로 나열)하면, 한 키가 한도의 <code>NAVER_LIMIT_THRESHOLD</code>(기본 80%)에 도달했을 때 다음 키로 자동 순환합니다.</p>
+
+      <h3 id="fallback">폴백 로직</h3>
+      <p>엔진이 다음 세 가지 이유로 실패하면 <em>결과가 아직 하나도 없을 때만</em> 나머지 등록된 엔진으로 한 차례 더 동시 폴백을 시도합니다.</p>
+      <ul class="plain">
+        <li><strong>EngineUnavailable</strong> — 네이버 키가 설정되어 있지 않음</li>
+        <li><strong>QuotaExceeded</strong> — 등록된 모든 네이버 키가 한도 근접</li>
+        <li><strong>PolicyRestricted</strong> — 원본 결과 전체가 불용어에 걸려 제외됨</li>
+      </ul>
+      <div class="callout">
+        <strong>중요한 설계 포인트</strong>
+        이미 다른 엔진에서 결과를 받았다면 폴백은 일부러 생략됩니다. 예를 들어 DuckDuckGo가 이미 결과를 반환했는데 네이버 키가 없다고 해서 또 다른 무거운 엔진을 추가로 돌리지 않습니다 — 실제로 이 조건이 빠져 있었을 때 응답시간이 8.9초까지 늘어지는 버그를 발견하고 고친 이력이 있습니다.
+      </div>
+
+      <h3 id="enrichment">BM25 관련성 필터 &amp; 본문 보강 &amp; 불용어 필터</h3>
+      <p>모든 엔진의 결과를 합친 뒤, 본문을 가져오기 <em>전에</em> <code>RELEVANCE_FILTER</code>(기본 켜짐)가 먼저 실행됩니다: 각 결과의 제목+설명(엔진이 이미 돌려준 텍스트, 추가 요청 없음)을 <a href="#bm25"><code>bm25_search</code></a>와 동일한 BM25 모델(<code>tokenizer.py</code>/<code>bm25_ranker.py</code>를 그대로 import)로 검색어와 비교하고, 이번 배치 최고 점수 대비 <code>RELEVANCE_MIN_SCORE_RATIO</code>(기본 0.15) 미만인 결과는 제외합니다. 여러 검색 종류를 합치면 성격이 다른 벡터(특히 <code>naver_encyc</code>)가 검색어와 한 단어만 우연히 겹치는 결과(예: 주가 질문에 "영구 제모 효과" 사전 항목)를 섞는 경우가 있는데, 이 필터가 본문 보강보다 먼저 실행되어 애초에 관련 없는 링크에 본문 요청을 낭비하지 않습니다.</p>
+      <p>필터를 통과한 결과 중 상위 <code>FETCH_CONTENT_TOP_N</code>개(기본 3개)는 스니펫 대신 실제 페이지 본문을 <code>trafilatura</code>로 추출해 채워 넣습니다. <code>include_comments=False</code>와 <code>favor_precision=True</code> 옵션 + 정규식 후처리로 댓글·저작권 문구 같은 비본문 텍스트를 제거합니다. 추출된 글자 수가 <code>FETCH_CONTENT_MIN_USEFUL_CHARS</code>(기본 200자) 미만이면(대개 JS 렌더링 페이지) 그 후보를 건너뛰고 다음 후보로 넘어갑니다.</p>
+      <p>불용어 필터(BM25 관련성 필터보다 앞선 단계, 각 엔진 내부에서 실행)는 각 엔진이 <code>max_results</code>보다 넉넉히(기본 10건) 가져온 뒤, 제목+스니펫에 <code>EXCLUDE_KEYWORDS</code>(기본: 야구·축구·올림픽 등 스포츠 용어)가 있으면 제외하고 남은 것 중 상위 개수만 반환합니다.</p>
+    </section>
+
+    <section id="threads">
+      <h2>쓰레드 구조 가이드 <span class="kicker">동시성 설계 이해하기</span></h2>
+      <p class="section-lede">Lens 안에서 스레드가 정확히 어디서, 왜 쓰이는지를 하나씩 짚어봅니다. 코드를 처음 보는 분도 따라올 수 있도록 "무엇이 문제였고, 어떻게 풀었는지" 순서로 설명합니다.</p>
+
+      <h3 id="thread-why">왜 스레드가 필요한가</h3>
+      <p>검색 엔진 하나하나는 결국 <strong>외부 서버에 HTTP 요청을 보내고 응답을 기다리는 일</strong>입니다. 이런 작업(I/O 대기)은 CPU를 쓰는 게 아니라 그냥 네트워크 응답이 올 때까지 멈춰 있는 시간이 대부분입니다. 그런데 만약 엔진 4개를 순서대로(하나 끝나면 다음 시작) 호출한다면, 각자 0.2~2초씩 걸리는 응답을 전부 더한 시간만큼 기다려야 합니다.</p>
+      <p>스레드를 쓰면 "기다리는 동안 다른 일도 같이 기다리게" 만들 수 있습니다. 4개 엔진을 동시에 쏘아 놓고, 가장 오래 걸리는 하나만큼만 기다리면 되는 것이죠. 실제로 이 프로젝트에서 측정한 수치가 이 효과를 잘 보여줍니다.</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>상황</th><th class="num">순차 실행이었다면</th><th class="num">실제(스레드 동시 실행)</th></tr></thead>
+          <tbody>
+            <tr><td>동시 요청 8개 (SSE 트랜스포트 테스트)</td><td class="num">~17.4초</td><td class="num"><strong>4.07초</strong></td></tr>
+            <tr><td>기본 엔진 4개(구 버전, 덕덕고 포함)</td><td class="num">~8~10초 추정</td><td class="num"><strong>3.49초</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="thread-batch">엔진 동시 실행과 타임아웃 — <code>SearchRouter._run_batch</code></h3>
+      <p>실제로 엔진들을 동시에 돌리는 코드는 이렇게 동작합니다:</p>
+
+      <div class="step-list">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div>
+            <h4>ThreadPoolExecutor에 한꺼번에 제출</h4>
+            <p>요청된 엔진 개수만큼 워커를 가진 풀을 만들고, 각 엔진의 <code>search()</code> 호출을 전부 <code>pool.submit()</code>으로 동시에 넘깁니다. 이 시점에서 엔진들은 이미 병렬로 실행되기 시작합니다.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div>
+            <h4>결과를 기다리되, 한없이 기다리지 않는다</h4>
+            <p>각 결과는 <code>future.result(timeout=SEARCH_ENGINE_TIMEOUT_SECONDS)</code>로 받습니다. 기본값은 15초 — 이 시간 안에 응답이 없는 엔진은 "시간 초과"로 기록하고 건너뜁니다. 다른 엔진들은 영향받지 않습니다.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div>
+            <h4>풀을 닫을 때 <code>wait=False</code>를 쓰는 이유</h4>
+            <p>여기가 실수하기 쉬운 부분입니다. <code>with ThreadPoolExecutor() as pool:</code> 처럼 <code>with</code>문을 쓰면, 블록을 빠져나갈 때 <code>shutdown(wait=True)</code>가 자동으로 호출되어 <strong>아직 안 끝난 스레드를 전부 기다립니다</strong> — 방금 타임아웃으로 포기한 그 느린 엔진까지 포함해서요. 그러면 타임아웃을 걸어둔 의미가 없어집니다. 그래서 Lens는 <code>with</code>문 대신 <code>pool.shutdown(wait=False)</code>를 명시적으로 호출합니다. 느린 스레드는 백그라운드에서 계속 실행되다 스스로(자신의 HTTP 타임아웃으로) 끝나고, 우리 응답은 그걸 기다리지 않고 먼저 나갑니다.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div>
+            <h4>결과가 없을 때만 한 번 더 — 폴백 라운드</h4>
+            <p>1차 실행이 끝났는데 결과가 하나도 없으면, 아직 시도 안 한 나머지 등록 엔진들을 <em>또 한 번 동시에</em> 실행합니다. 반복적으로 큐를 도는 구조가 아니라 "필요하면 딱 한 라운드 더"이기 때문에 구조가 단순하고 예측 가능합니다.</p>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">5</div>
+          <div>
+            <h4>공유 상태는 잠금(Lock)으로 보호</h4>
+            <p>엔진들이 동시에 호출 횟수를 기록(<code>CallStats.record()</code>)할 수 있기 때문에, 이 카운터는 <code>threading.Lock</code>으로 감싸져 있습니다. 잠금이 없으면 두 스레드가 동시에 "지금 카운트는 5야" 읽고 "6이 됐어" 저장하면서 실제로는 한 번만 반영되는(lost update) 문제가 생길 수 있습니다. 본문 보강 단계(<code>_enrich_with_content</code>)에서 여러 페이지를 동시에 가져올 때도 같은 이유로 스레드풀을 씁니다 — 다만 그쪽은 서로 다른 URL을 읽기만 하므로 별도 잠금은 필요 없습니다.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout warn">
+        <strong>왜 그냥 하나씩 처리하면 안 되나요?</strong>
+        네트워크 대기 시간은 CPU가 쉬는 시간입니다. 파이썬의 GIL(Global Interpreter Lock)이 CPU 연산은 한 번에 한 스레드만 돌리게 막지만, <em>I/O 대기 중에는 GIL이 풀리기 때문에</em> 다른 스레드가 그 사이 자기 네트워크 요청을 보낼 수 있습니다. 그래서 이런 "여러 곳에 요청 보내고 기다리는" 작업은 스레드만으로도 충분히 병렬 효과를 볼 수 있습니다.
+      </div>
+
+      <h3 id="thread-bridge">FastMCP와 이벤트 루프 사이의 다리 — <code>anyio.to_thread.run_sync</code></h3>
+      <p>MCP 서버 프레임워크(FastMCP)는 동기(sync) 함수로 만든 툴을 <strong>이벤트 루프 스레드에서 직접</strong> 호출합니다. 리소스와 달리 별도 워커 스레드로 자동으로 옮겨주지 않습니다. 이게 왜 문제가 될까요?</p>
+      <ul class="plain">
+        <li><strong>stdio 트랜스포트</strong>에서는 한 번에 요청이 하나뿐이라 문제가 되지 않습니다.</li>
+        <li>하지만 <strong>sse/streamable-http 트랜스포트</strong>는 여러 클라이언트가 동시에 접속할 수 있는데, 검색 하나가 이벤트 루프를 블로킹하면 <em>그 사이 다른 모든 클라이언트의 요청이 멈춰버립니다.</em></li>
+      </ul>
+      <p>그래서 <code>web_search</code> 툴 함수는 <code>async def</code>로 선언하고, 실제 작업은 <code>await anyio.to_thread.run_sync(router.search, ...)</code>로 별도 워커 스레드에 위임합니다. 이렇게 하면 이벤트 루프는 즉시 다음 클라이언트를 처리하러 돌아갈 수 있습니다. 이 수정 전후로 실제 재현·측정한 결과가 위 표의 "동시 요청 8개" 행입니다.</p>
+    </section>
+
+    <section id="config">
+      <h2>설정 가이드</h2>
+      <p class="section-lede">모든 동작은 <code>.env</code>로 조정됩니다. 코드에는 기본값만 있고, 하드코딩된 설정은 없습니다. <code>.env.example</code>을 복사해 시작하세요.</p>
+      <pre><code>cp .env.example .env</code></pre>
+
+      <h3>네이버 인증 &amp; 검색 종류</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>변수</th><th>설명</th><th>기본값</th></tr></thead>
+          <tbody>
+            <tr><td><code>NAVER_CLIENT_IDS</code><br><code>NAVER_CLIENT_SECRETS</code></td><td>Client ID/Secret 배열 (콤마 구분, 순서로 짝지어짐). 여러 개 등록 시 한도 근접한 키를 자동 순환</td><td>(없음)</td></tr>
+            <tr><td><code>NAVER_DAILY_LIMIT</code></td><td>키 1개당 1일 호출 한도</td><td><code>25000</code></td></tr>
+            <tr><td><code>NAVER_LIMIT_THRESHOLD</code></td><td>이 비율 도달 시 다음 키로 순환</td><td><code>0.8</code></td></tr>
+            <tr><td><code>NAVER_SEARCH_ENDPOINT</code> / <code>_2</code> / <code>_3</code></td><td>네이버 검색 종류 (뉴스/웹문서/백과사전), 같은 키로 3개까지 등록</td><td><code>news</code> / <code>webkr</code> / <code>encyc</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>필터링 &amp; 본문 보강</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>변수</th><th>설명</th><th>기본값</th></tr></thead>
+          <tbody>
+            <tr><td><code>EXCLUDE_KEYWORDS</code></td><td>결과에서 제외할 키워드 (콤마 구분)</td><td>야구,축구,농구,배구,골프,올림픽 등</td></tr>
+            <tr><td><code>EXCLUDE_OVERFETCH_COUNT</code></td><td>필터링 시 미리 넉넉히 가져올 개수</td><td><code>10</code></td></tr>
+            <tr><td><code>RELEVANCE_FILTER</code></td><td>BM25 관련성 필터 켜기/끄기 (엔진 합산 결과를 검색어와 BM25로 비교해 관련 없는 것 제외, <a href="#bm25">BM25 유사도 검색</a> 참고)</td><td><code>true</code></td></tr>
+            <tr><td><code>RELEVANCE_MIN_SCORE_RATIO</code></td><td>이번 배치 최고 BM25 점수 대비 이 비율 미만이면 제외</td><td><code>0.15</code></td></tr>
+            <tr><td><code>FETCH_CONTENT</code></td><td>본문 보강 켜기/끄기 (관련성 필터를 통과한 결과에만 적용)</td><td><code>true</code></td></tr>
+            <tr><td><code>FETCH_CONTENT_TOP_N</code></td><td>본문을 가져올 상위 결과 개수 (전체 엔진 합산)</td><td><code>3</code></td></tr>
+            <tr><td><code>FETCH_CONTENT_MAX_CHARS</code></td><td>본문 최대 글자 수</td><td><code>3000</code></td></tr>
+            <tr><td><code>FETCH_CONTENT_MIN_USEFUL_CHARS</code></td><td>이보다 적으면 추출 실패로 간주하고 다음 후보로</td><td><code>200</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>엔진 구성 &amp; 동시성</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>변수</th><th>설명</th><th>기본값</th></tr></thead>
+          <tbody>
+            <tr><td><code>SEARCH_ENGINE_MODE</code></td><td>프리셋: <code>hybrid</code>(전체)/<code>naver</code>(네이버만)/<code>duckduckgo</code>. <code>DEFAULT_ENGINES</code> 지정 시 무시됨</td><td><code>naver</code></td></tr>
+            <tr><td><code>DEFAULT_ENGINES</code></td><td><code>engines="all"</code>일 때 사용할 엔진 목록 (프리셋보다 우선)</td><td><code>naver,naver_web,naver_encyc</code></td></tr>
+            <tr><td><code>SEARCH_ENGINE_TIMEOUT_SECONDS</code></td><td>엔진 하나당 최대 대기 시간</td><td><code>15</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>로깅 &amp; 트랜스포트</h3>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>변수</th><th>설명</th><th>기본값</th></tr></thead>
+          <tbody>
+            <tr><td><code>LOG_LEVEL</code> / <code>LOG_FILE</code></td><td>로그 레벨 / 파일 경로</td><td><code>INFO</code> / <code>search.log</code></td></tr>
+            <tr><td><code>HIT_COUNT_LOG_FILE</code> / <code>HIT_COUNT_INTERVAL_SECONDS</code></td><td>호출 현황 전용 로그 / 기록 주기(초)</td><td><code>hit_count.log</code> / <code>60</code></td></tr>
+            <tr><td><code>MCP_TRANSPORT</code></td><td><code>stdio</code>(기본) / <code>sse</code> / <code>streamable-http</code></td><td><code>stdio</code></td></tr>
+            <tr><td><code>MCP_HOST</code> / <code>MCP_PORT</code></td><td>네트워크 트랜스포트일 때만 사용</td><td><code>127.0.0.1</code> / <code>8000</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <strong>네이버 키 발급 시 주의</strong>
+        <a href="https://developers.naver.com/apps">네이버 개발자센터</a>에서 앱 등록 후 "검색" API를 추가하면 Client ID/Secret을 확인할 수 있습니다. ID와 Secret은 서로 다른 값이니 헷갈려 같은 값을 두 군데 넣지 마세요 — <code>401 Unauthorized</code>가 발생합니다.
+      </div>
+    </section>
+
+    <section id="mcp-setup">
+      <h2>MCP 클라이언트 등록</h2>
+      <p class="section-lede">기본값인 stdio 방식은 URL이 없습니다. 클라이언트가 명령어로 직접 프로세스를 띄우고 표준입출력으로 통신합니다.</p>
+
+      <h3>Claude Code</h3>
+      <pre><code>claude mcp add --transport stdio web-search -- "&lt;venv&gt;\Scripts\python.exe" "&lt;project&gt;\server.py"</code></pre>
+      <p>네트워크로 띄우려면(<code>MCP_TRANSPORT=sse</code> 또는 <code>streamable-http</code> 설정 후):</p>
+      <pre><code>claude mcp add --transport http web-search http://127.0.0.1:8000/mcp</code></pre>
+
+      <h3>Claude Desktop</h3>
+      <pre><code>{
+  "mcpServers": {
+    "web-search": {
+      "command": "&lt;venv&gt;\\Scripts\\python.exe",
+      "args": ["&lt;project&gt;\\server.py"]
+    }
+  }
+}</code></pre>
+      <p>sse/streamable-http로 띄운 원격 서버는 Claude Desktop이 URL을 직접 지원하지 않아 <code>mcp-remote</code> 같은 브릿지가 필요합니다.</p>
+    </section>
+
+    <section id="bm25">
+      <h2>BM25 유사도 검색 <span class="kicker">bm25_search/</span></h2>
+      <p class="section-lede"><code>pipeline.py</code>는 네이버 뉴스 후보군을 가져와 <strong>BM25 키워드 유사도 × 최신성 감쇠</strong>로 재정렬해 상위 4건만 남기는 독립 CLI/스크립트입니다. 그 안의 <code>tokenizer.py</code>/<code>bm25_ranker.py</code> 두 모듈은 별도 공용 부품이기도 해서, <strong><code>server.py</code>의 <code>web_search</code> 툴 자체</strong>와 <code>test/webapp</code> 데모 챗 둘 다 그대로 가져다 씁니다 — 검색엔진 여러 개를 합치면 가끔 완전히 엉뚱한 결과(예: 주가 질문에 "영구 제모 효과" 같은 백과사전 항목)가 섞이는데, 각 결과의 제목+설명(엔진이 이미 돌려준 텍스트, 추가 요청 없음)을 같은 BM25 모델로 검색어와 비교해 본문 보강 이전에 걸러냅니다. 이 필터는 데모 페이지에만 있는 게 아니라 <strong>MCP 서버 자체에 내장</strong>되어 있어, Claude Desktop 등 어떤 MCP 클라이언트로 붙어도 동일하게 적용됩니다 (<code>RELEVANCE_FILTER</code>/<code>RELEVANCE_MIN_SCORE_RATIO</code>, <a href="#config">설정 가이드</a> 참고).</p>
+
+      <h3 id="bm25-pipeline">파이프라인 구조</h3>
+      <div class="flow" role="img" aria-label="fetcher에서 tokenizer, bm25_ranker, ranker를 거쳐 pipeline이 최종 결과를 반환하는 흐름">
+        <div class="node">fetcher.py</div><div class="arrow">→</div>
+        <div class="node">tokenizer.py</div><div class="arrow">→</div>
+        <div class="node">bm25_ranker.py</div><div class="arrow">→</div>
+        <div class="node">ranker.py</div><div class="arrow">→</div>
+        <div class="node">pipeline.py</div>
+      </div>
+
+      <div class="grid-cards">
+        <div class="feature">
+          <div class="f-title">fetcher.py</div>
+          <div class="f-body">네이버 뉴스 API로 후보 목록 수집 + 각 기사 원문을 <strong>스레드풀로 동시에</strong> 가져옴</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">tokenizer.py</div>
+          <div class="f-body">Kiwi 인스턴스를 모듈 레벨에서 1회만 생성(모델 로딩이 비싼 부분). HTML 제거 후 명사·용언 어간만 추출, 배치 토큰화 지원</div>
+        </div>
+        <div class="feature">
+          <div class="f-title">bm25_ranker.py</div>
+          <div class="f-body"><code>rank_bm25.BM25Okapi</code> 기반 <code>build_index()</code> / <code>search()</code></div>
+        </div>
+        <div class="feature">
+          <div class="f-title">ranker.py</div>
+          <div class="f-body">BM25 점수 × <code>exp(-λ·경과시간)</code> 최신성 감쇠로 재정렬하는 <code>rerank()</code></div>
+        </div>
+        <div class="feature">
+          <div class="f-title">pipeline.py</div>
+          <div class="f-body">네 단계를 순서대로 오케스트레이션, 기본 상위 4건만 반환</div>
+        </div>
+      </div>
+      <pre><code>.venv/Scripts/python.exe -m bm25_search.pipeline "검색어"</code></pre>
+
+      <h3 id="bm25-results">평가 결과</h3>
+      <p>네이버 뉴스 실 API로 측정 (Kiwi 워커풀 워밍업 후). 재현: <code>test/test_bm25_benchmark.py</code>.</p>
+
+      <h4>1) 성능 — 후보 개수별 랭킹 단계 소요시간</h4>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>후보 개수</th><th class="num">소요시간</th></tr></thead>
+          <tbody>
+            <tr><td>30</td><td class="num">14.2ms</td></tr>
+            <tr><td>60</td><td class="num">27.2ms</td></tr>
+            <tr><td>100</td><td class="num">45.9ms</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>후보 30~100건 전 구간에서 100ms 목표를 여유 있게 만족하며, 후보 개수에 거의 선형으로 비례합니다.</p>
+
+      <h4>2) 속도 — 대상 텍스트 범위에 따른 차이 (후보 30건, 5회 중앙값)</h4>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>대상 텍스트</th><th class="num">tokenize_batch</th><th class="num">bm25+rerank</th><th class="num">합계</th></tr></thead>
+          <tbody>
+            <tr class="highlight"><td>title + 설명(스니펫)만</td><td class="num">11.6ms</td><td class="num">1.1ms</td><td class="num"><strong>12.7ms</strong></td></tr>
+            <tr><td>title + 전체 본문</td><td class="num">149.7ms</td><td class="num">4.7ms</td><td class="num"><strong>154.4ms</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>전체 본문을 포함하면 텍스트량이 늘어 랭킹 자체는 150ms 안팎이 되지만, 이 모드에서는 기사 원문을 가져오는 네트워크 fetch(30건 기준 2~4초, 스레드풀 동시 실행)가 전체 시간을 지배하므로 실질적 영향은 적습니다.</p>
+
+      <h4>3) 품질 — 정렬 방식별 질의어 일치도</h4>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>정렬 방식</th><th class="num">평균 질의어 일치 수 (상위 4건)</th></tr></thead>
+          <tbody>
+            <tr><td>네이버 기본 순서 (그대로)</td><td class="num">1.75</td></tr>
+            <tr><td>BM25만 적용</td><td class="num">2.00</td></tr>
+            <tr class="highlight"><td>BM25 + 최신성 감쇠</td><td class="num">2.00</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>BM25 재정렬이 네이버 기본 순서보다 질의어와 실제로 더 많이 겹치는 문서를 상위로 올리는 것을 확인했습니다. 이 실행에서는 모든 후보가 같은 날짜 뉴스라 최신성 감쇠가 BM25 전용 순서를 바꾸지는 않았는데, 오래된 기사와 최신 기사가 섞인 질의에서는 감쇠가 실제로 순위를 재조정합니다(<code>decay_lambda</code>로 감쇠 속도 조절 가능).</p>
+
+      <div class="callout">
+        <strong>워밍업 비용 참고</strong>
+        Kiwi의 배치 토큰화는 프로세스 내 최초 1회 호출 시 내부 워커풀을 초기화하며 약 1~1.5초의 워밍업 비용이 듭니다. 계속 떠있는 서버 프로세스에서는 이 비용이 최초 1회만 발생하므로 위 수치가 대부분의 실제 호출에 적용됩니다.
+      </div>
+    </section>
+
+    <section id="speed">
+      <h2>검색 속도 리포트</h2>
+      <p class="section-lede"><code>web_search</code>의 실제 응답 속도를 여러 구성으로 실측했습니다. 동일 질의를 3~5회 반복한 평균이며, 네트워크 상태에 따라 변동될 수 있습니다.</p>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>구성</th><th class="num">평균</th><th>비고</th></tr></thead>
+          <tbody>
+            <tr><td>DuckDuckGo만</td><td class="num">4.9초<br><span class="pill critical">최대 8.9초</span></td><td>ddgs가 내부적으로 여러 백엔드를 순회해 느리고 편차가 큼</td></tr>
+            <tr><td>전체 4엔진 + 본문보강 (구 버전 기본값)</td><td class="num">5.2초</td><td>DuckDuckGo가 병목</td></tr>
+            <tr><td>네이버 3종(뉴스+웹+사전), 본문보강 OFF</td><td class="num">0.63초</td><td></td></tr>
+            <tr><td>네이버 뉴스만, 본문보강 OFF</td><td class="num"><strong>0.25초</strong> <span class="pill good">최속</span></td><td>순수 속도 최우선일 때</td></tr>
+            <tr><td>네이버 뉴스만, 본문보강 ON</td><td class="num">0.84초</td><td></td></tr>
+            <tr class="highlight"><td>네이버 3종 + 본문보강 ON</td><td class="num"><strong>1.48초</strong> <span class="pill good">현재 기본값</span></td><td>속도보다 커버리지·답변 품질 우선</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>DuckDuckGo(ddgs)는 응답 속도가 근본적으로 느리고 편차가 커서 기본 엔진 목록에서 제외했습니다 — 필요하면 <code>engines="duckduckgo"</code>로 여전히 명시적으로 쓸 수 있습니다. 본문 보강은 상위 결과 페이지를 실제로 방문하는 추가 네트워크 단계라, 어떤 엔진 조합이든 <strong>+0.5~0.8초 정도</strong>가 더 붙는 근본적인 트레이드오프입니다.</p>
+
+      <pre><code>.venv/Scripts/python.exe -c "
+import time, server
+t0 = time.perf_counter()
+server.router.search('삼성전자 주가', 3, engines='all')
+print(time.perf_counter() - t0)
+"</code></pre>
+    </section>
+
+  </main>
+</div>
+
+<footer class="page-footer">
+  Lens — 통합 검색 MCP 서버 내부 문서. 전체 소스는 <code>server.py</code>, <code>bm25_search/</code>, 설정은 <code>.env.example</code>을 참고하세요.
+</footer>

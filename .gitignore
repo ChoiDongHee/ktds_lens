@@ -1,0 +1,15 @@
+# Secrets -- never commit real credentials. .env.example is the template.
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime-generated logs/state (regenerate on every run)
+*.log
+search_stats.json
+
+# Editor/OS cruft
+.DS_Store
+Thumbs.db

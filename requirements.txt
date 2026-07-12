@@ -1,0 +1,8 @@
+mcp
+ddgs
+httpx
+python-dotenv
+anyio
+trafilatura
+kiwipiepy
+rank_bm25
