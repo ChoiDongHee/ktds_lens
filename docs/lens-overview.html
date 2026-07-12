@@ -438,6 +438,10 @@
     <div class="toc-title">목차</div>
     <ol>
       <li><a href="#overview">개요</a></li>
+      <li><a href="#directory">디렉토리 구조 &amp; 실행 방법</a></li>
+      <li class="sub"><a href="#directory-tree">디렉토리 구조</a></li>
+      <li class="sub"><a href="#running">실행 방법</a></li>
+      <li class="sub"><a href="#startup-sequence">기동 순서</a></li>
       <li><a href="#architecture">아키텍처</a></li>
       <li class="sub"><a href="#engines">검색 엔진</a></li>
       <li class="sub"><a href="#fallback">폴백 로직</a></li>
@@ -498,8 +502,37 @@
         <code>search_stats()</code> — 오늘 엔진·키별 호출 현황 및 남은 한도 조회
       </div>
 
-      <h3>소스 위치 &amp; 실행 방법</h3>
-      <p>핵심 서버 로직은 프로젝트 루트의 <code>server.py</code> 한 파일입니다. 전체 소스: <a href="https://github.com/ChoiDongHee/ktds_lens">github.com/ChoiDongHee/ktds_lens</a></p>
+    </section>
+
+    <section id="directory">
+      <h2>디렉토리 구조 &amp; 실행 방법</h2>
+      <p class="section-lede">핵심 서버 로직은 프로젝트 루트의 <code>server.py</code> 한 파일입니다. 전체 소스: <a href="https://github.com/ChoiDongHee/ktds_lens">github.com/ChoiDongHee/ktds_lens</a></p>
+
+      <h3 id="directory-tree">디렉토리 구조</h3>
+      <pre><code>ktds_lens/
+├── server.py                    # MCP 서버 본체 -- 이 저장소의 핵심. 이 파일 하나만 실행하면 서버가 뜸
+├── requirements.txt              # pip 의존성 목록
+├── .env / .env.example           # 환경설정 (.env는 실제 값이라 git에 안 올라감 / .env.example은 템플릿)
+├── search.log, hit_count.log, search_stats.json   # 서버 실행 중 자동 생성되는 런타임 파일 (git에 안 올라감)
+│
+├── bm25_search/                  # BM25 유사도 검색 패키지 -- server.py가 관련성 필터로 직접 import
+│   ├── fetcher.py                 # 네이버 뉴스 후보 목록 수집 (독립 파이프라인 전용)
+│   ├── tokenizer.py                # Kiwi 형태소 분석 -- server.py가 관련성 필터에서 재사용
+│   ├── bm25_ranker.py               # rank_bm25 래퍼 -- server.py가 관련성 필터에서 재사용
+│   ├── ranker.py                    # 최신성 감쇠 재정렬 (독립 파이프라인 전용)
+│   └── pipeline.py                  # 위 네 개를 오케스트레이션하는 독립 CLI (python -m bm25_search.pipeline)
+│
+├── test/                          # server.py의 실제 동작에는 관여하지 않는 테스트/데모 코드
+│   ├── test_mcp_client.py          # 실제 MCP 프로토콜 종단 테스트
+│   ├── test_bm25_benchmark.py      # bm25_search 성능/품질 벤치마크
+│   └── webapp/app.py                # FastAPI 데모 챗 -- server.py를 모듈로 직접 import, MCP 프로토콜은 안 거침
+│
+├── backup/google_engine_removed.py  # 제거된 Google 검색 엔진 코드 (복원 노트 포함, 참고용 보관)
+├── docs/lens-overview.html         # 이 문서
+└── README.md / CLAUDE.md / PLAN.md  # 문서 (사용법 / AI 코딩 어시스턴트 가이드 / 설계·검증 기록)</code></pre>
+      <p>실제 MCP 서버가 참조하는 코드는 <strong><code>server.py</code>와 <code>bm25_search/</code> 두 곳뿐</strong>입니다. <code>test/</code>, <code>backup/</code>, <code>docs/</code>는 개발/검증/문서 목적으로만 존재합니다.</p>
+
+      <h3 id="running">실행 방법</h3>
       <pre><code>git clone https://github.com/ChoiDongHee/ktds_lens.git
 cd ktds_lens
 .venv/Scripts/python.exe -m pip install -r requirements.txt
@@ -510,6 +543,42 @@ cp .env.example .env   # 값 채우기
 
 # 2) 또는 MCP 클라이언트에 등록해서 클라이언트가 자동으로 띄우게 함 (아래 "MCP 클라이언트 등록" 참고)
 # 3) 네트워크로 공유하려면 .env의 MCP_TRANSPORT=sse 로 바꾸고 위와 동일하게 실행</code></pre>
+
+      <h3 id="startup-sequence"><code>server.py</code> 실행 시 내부적으로 일어나는 일</h3>
+      <p>어느 실행 방식이든 실제로 뜨는 건 동일한 <code>server.py</code> 프로세스이고, 차이는 <strong>"누가 이 프로세스를 실행/유지하는가"</strong> 뿐입니다. 기동 순서:</p>
+      <ol class="plain">
+        <li><code>.env</code> 로드 + Windows UTF-8 인코딩 강제 설정 (콘솔 기본 코드페이지로는 검색 결과의 한글/특수문자를 못 담아 프로토콜이 깨지는 걸 방지)</li>
+        <li>로깅 설정 — <code>search.log</code> + stderr로만 기록 (stdout은 MCP 프로토콜 전용)</li>
+        <li><code>CallStats</code>가 <code>search_stats.json</code>을 읽어 오늘자 엔진/키별 호출 수를 복원</li>
+        <li>엔진 등록 — DuckDuckGo + 네이버(<code>.env</code>에 설정된 만큼 뉴스/웹문서/사전) → <code>SearchRouter</code> 구성</li>
+        <li>시작 요약 로그 1줄 기록 (<code>"Lens 서버 설정: ..."</code> — 등록된 엔진, <code>engines="all"</code>이 실제로 뭘 의미하는지, 관련성 필터/본문보강 on-off 등)</li>
+        <li>호출 현황을 주기적으로 기록하는 백그라운드 데몬 스레드(<code>_hit_count_loop</code>) 시작 — 트랜스포트와 무관하게 항상 돎</li>
+        <li><code>FastMCP("Lens", ...)</code> 인스턴스 생성, <code>web_search</code>/<code>search_stats</code> 두 툴 등록</li>
+        <li><code>mcp.run(transport=...)</code> 호출 — <strong>여기부터가 실제로 "서버로 실행되는" 부분</strong>이며, 이 한 줄의 실제 동작은 트랜스포트에 따라 완전히 다릅니다.</li>
+      </ol>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>트랜스포트</th><th>실제 동작</th><th>프로세스를 누가 띄우고 끄는가</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>stdio</code> (기본값)</td>
+              <td>네트워크 포트를 열지 않음. stdin으로 MCP 요청(JSON-RPC)을 읽고 stdout으로 응답을 씀.</td>
+              <td><strong>클라이언트가 직접 실행</strong>합니다 — Claude Desktop/Code가 등록된 명령어로 이 프로세스를 spawn하고, 클라이언트를 끄거나 연결을 끊으면 이 프로세스도 함께 종료됩니다. 사람이 미리 띄워둘 필요가 없습니다.</td>
+            </tr>
+            <tr>
+              <td><code>sse</code> / <code>streamable-http</code></td>
+              <td>Uvicorn ASGI 서버가 실제로 <code>MCP_HOST:MCP_PORT</code>에 바인딩되어 대기. 클라이언트는 HTTP로 접속.</td>
+              <td><strong>사람이 직접 <code>python server.py</code>로 띄워서 계속 떠 있게 유지</strong>해야 하는, 일반적인 웹 서버 프로세스와 동일한 형태입니다. 여러 클라이언트가 같은 URL로 동시에 접속할 수 있습니다.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <strong>데모 웹앱은 MCP 프로토콜을 안 거침</strong>
+        <code>test/webapp/app.py</code>는 <code>import server</code>로 <code>server.py</code>를 그냥 파이썬 모듈로 불러와 <code>server.router.search()</code>를 직접 함수 호출합니다 — MCP 프로토콜을 전혀 거치지 않습니다. 실제 MCP 프로토콜 종단 테스트가 필요하면 <code>test/test_mcp_client.py</code>를 실행하세요 (SSE로 진짜 서버 프로세스를 띄우고 진짜 클라이언트처럼 연결해 검증합니다).
+      </div>
     </section>
 
     <section id="architecture">
