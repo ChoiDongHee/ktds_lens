@@ -14,6 +14,7 @@ from datetime import date
 import anyio.to_thread
 import httpx
 import trafilatura
+from trafilatura.settings import use_config as _trafilatura_use_config
 from dotenv import load_dotenv
 from ddgs import DDGS
 from mcp.server.fastmcp import FastMCP
@@ -468,9 +469,20 @@ def _fetch_page_text(url: str, max_chars: int) -> str:
     ~0 chars for JS-rendered pages with no real static content, instead of
     returning nav-menu text as if it were the article). Best-effort: any
     failure (timeout, non-HTML, 404, blocked, no content found, ...) just
-    returns "" so one bad link doesn't affect anything else."""
+    returns "" so one bad link doesn't affect anything else.
+
+    Uses _TRAFILATURA_CONFIG (FETCH_CONTENT_TIMEOUT_SECONDS) rather than
+    trafilatura's own default -- its default DOWNLOAD_TIMEOUT is 30s with no
+    cap on how large a file it'll try to pull down (MAX_FILE_SIZE defaults
+    to 20MB), so one candidate that happens to be a large PDF/binary can
+    single-handedly stall this whole call for 30+ seconds. _enrich_with_
+    content submits every candidate to the same thread pool and blocks
+    until they've all resolved, so this per-fetch cap is what actually
+    bounds the enrichment step's wall-clock time -- found via a review of
+    URL-query handling that turned up exactly this case live (a search
+    result pointing at a large OWASP PDF took 37.9s to fetch)."""
     try:
-        downloaded = trafilatura.fetch_url(url)
+        downloaded = trafilatura.fetch_url(url, config=_TRAFILATURA_CONFIG)
         if not downloaded:
             return ""
         # include_comments=False: trafilatura defaults to True, which is
@@ -877,6 +889,16 @@ FETCH_CONTENT = os.environ.get("FETCH_CONTENT", "true").lower() == "true"
 FETCH_CONTENT_TOP_N = int(os.environ.get("FETCH_CONTENT_TOP_N", "3"))
 FETCH_CONTENT_MAX_CHARS = int(os.environ.get("FETCH_CONTENT_MAX_CHARS", "3000"))
 FETCH_CONTENT_MIN_USEFUL_CHARS = int(os.environ.get("FETCH_CONTENT_MIN_USEFUL_CHARS", "200"))
+
+# trafilatura.fetch_url()'s own default DOWNLOAD_TIMEOUT is 30s with up to
+# 20MB allowed per download (MAX_FILE_SIZE) -- generous enough that one
+# candidate happening to be a large PDF/binary can single-handedly stall
+# the whole enrichment step (found live: an OWASP security-guide PDF took
+# 37.9s to fetch). This overrides just the timeout to something in line
+# with the rest of this file's per-call bounds (SEARCH_ENGINE_TIMEOUT_SECONDS).
+FETCH_CONTENT_TIMEOUT_SECONDS = float(os.environ.get("FETCH_CONTENT_TIMEOUT_SECONDS", "8"))
+_TRAFILATURA_CONFIG = _trafilatura_use_config()
+_TRAFILATURA_CONFIG.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(FETCH_CONTENT_TIMEOUT_SECONDS))
 
 # engines used when web_search(engines="all"). SEARCH_ENGINE_MODE is a
 # convenience preset ("naver" = every registered Naver vertical only,
