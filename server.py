@@ -498,6 +498,40 @@ def _fetch_page_text(url: str, max_chars: int) -> str:
         return ""
 
 
+_PDF_URL_RE = re.compile(r"\.pdf(?:[?#]|$)", re.IGNORECASE)
+
+
+def _looks_like_pdf(url: str) -> bool:
+    """PDFs are binary documents trafilatura's HTML-oriented extractor
+    doesn't handle well -- verified live: extracting one produced a
+    fragmented, low-signal mess ("org 2 The Open Web Application Security
+    Project (OWASP) is a worldwide free and open com... cross domain policy
+    (OTG-CONFIG-008)...") rather than real usable article text, on top of
+    tending to be large/slow downloads (see FETCH_CONTENT_TIMEOUT_SECONDS).
+    Detected by URL extension -- cheap, no network round trip -- so these
+    candidates are skipped before ever being submitted to the fetch pool,
+    freeing that slot for the next (non-PDF) candidate instead."""
+    return bool(_PDF_URL_RE.search(url))
+
+
+def _filter_out_pdfs(results_by_engine: dict[str, list[dict]], request_id: str = "") -> None:
+    """Mutates results_by_engine in place, dropping any result whose URL is
+    a PDF entirely -- not just skipping our own content-fetch for it (see
+    _looks_like_pdf/​_enrich_with_content), but excluding it from the result
+    set altogether. Naver's own search snippet for a PDF result is often
+    just a raw, out-of-context fragment of the document's text (e.g.
+    "org 2 The Open Web Application Security Project (OWASP) is a
+    worldwide free and open com...") -- unreadable on its own regardless of
+    whether Lens or Naver produced it, so there's nothing useful left to
+    show once PDFs are ruled out as a content-enrichment source."""
+    for name, results in results_by_engine.items():
+        kept = [r for r in results if not (r.get("url") and _looks_like_pdf(r["url"]))]
+        dropped = len(results) - len(kept)
+        if dropped:
+            logger.info("[%s][%s] PDF 결과 %d건 제외", request_id, name, dropped)
+            results_by_engine[name] = kept
+
+
 def _enrich_with_content(
     results: list[dict], top_n: int, max_chars: int, min_useful_chars: int, request_id: str = ""
 ) -> None:
@@ -508,8 +542,13 @@ def _enrich_with_content(
     the list until `top_n` of them have yielded *useful* content (>=
     min_useful_chars) -- so JS-rendered pages that return only nav
     boilerplate don't crowd out real article content, they're just skipped
-    in favor of the next candidate."""
-    candidates = [r for r in results if r.get("url")]
+    in favor of the next candidate. PDF URLs are excluded from candidates
+    entirely (see _looks_like_pdf)."""
+    all_candidates = [r for r in results if r.get("url")]
+    candidates = [r for r in all_candidates if not _looks_like_pdf(r["url"])]
+    skipped_pdfs = len(all_candidates) - len(candidates)
+    if skipped_pdfs:
+        logger.info("[%s] PDF로 추정되는 후보 %d개는 본문 보강 대상에서 제외", request_id, skipped_pdfs)
     if not candidates or top_n <= 0:
         return
     started = time.perf_counter()
@@ -741,6 +780,11 @@ class SearchRouter:
                     results_by_engine, outcomes,
                 )
 
+        try:
+            _filter_out_pdfs(results_by_engine, request_id)
+        except Exception:
+            logger.exception("[%s] PDF 결과 제외 중 오류 (필터링 없이 계속 진행)", request_id)
+
         if RELEVANCE_FILTER:
             # BM25 filtering only makes sense with results from more than
             # one query -- a single-result batch has nothing to be more/less
@@ -858,7 +902,7 @@ _STATS_FILE = os.path.join(_BASE_DIR, "search_stats.json")
 # results from the concurrent thread-pool batch in SearchRouter._run_batch.
 # A slow/hanging engine (network issue, upstream API degraded) is logged and
 # skipped rather than blocking the whole request indefinitely.
-SEARCH_ENGINE_TIMEOUT_SECONDS = float(os.environ.get("SEARCH_ENGINE_TIMEOUT_SECONDS", "15"))
+SEARCH_ENGINE_TIMEOUT_SECONDS = float(os.environ.get("SEARCH_ENGINE_TIMEOUT_SECONDS", "8"))
 
 # 네이버 오픈API는 키(앱)마다 1일 호출 한도가 있으므로, 각 키의 한도 중 일정 비율
 # (threshold) 이상 쓰면 다음 키로 순환하고, 등록된 모든 키가 한도에 가까워지면 다른
@@ -896,7 +940,7 @@ FETCH_CONTENT_MIN_USEFUL_CHARS = int(os.environ.get("FETCH_CONTENT_MIN_USEFUL_CH
 # the whole enrichment step (found live: an OWASP security-guide PDF took
 # 37.9s to fetch). This overrides just the timeout to something in line
 # with the rest of this file's per-call bounds (SEARCH_ENGINE_TIMEOUT_SECONDS).
-FETCH_CONTENT_TIMEOUT_SECONDS = float(os.environ.get("FETCH_CONTENT_TIMEOUT_SECONDS", "8"))
+FETCH_CONTENT_TIMEOUT_SECONDS = float(os.environ.get("FETCH_CONTENT_TIMEOUT_SECONDS", "5"))
 _TRAFILATURA_CONFIG = _trafilatura_use_config()
 _TRAFILATURA_CONFIG.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(FETCH_CONTENT_TIMEOUT_SECONDS))
 
